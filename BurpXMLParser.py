@@ -10,6 +10,12 @@ import sys
 import logging
 import logging.config
 from logging.config import fileConfig
+from docx import Document
+from docx.shared import RGBColor
+import matplotlib.pyplot as plt
+import io
+import re
+
 
 
 # Should be done better with loghandler. But cheap way to clear the issue log file on run
@@ -38,6 +44,7 @@ issue_logger = logging.getLogger('xmlparser.issues')
 # define globals
 global issueList
 global vulnList
+global paths
 global skippedVulnList
 global xmlFileIn
 global docOutFile
@@ -58,6 +65,7 @@ docOutFile = cli_WORDFILE
 issueList = []
 vulnList = []
 skippedVulnList = []
+paths = []
 # init Document
 document = Document()
 
@@ -131,9 +139,26 @@ def buildWordDoc(name, severity, host, ip, path, location, issueBackground, issu
     # use title to fix Capitals
     severity = severity.title()
     # Build Our header format here.
+    if severity == "High Risk":
+        color = RGBColor(255, 0, 0)  # Red
+    elif severity == "Medium Risk":
+        color = RGBColor(255, 165, 0)  # Orange
+    elif severity == "Low Risk":
+        color = None
+    else:
+        color = RGBColor(0, 128, 0)  # Green
+    
+    # Build header with colored text
     build_header = '{} ({})'.format(name, severity)
-    status_logger.info('Creating Issue: {}'.format(build_header))
-    document.add_heading(build_header, level=2)
+
+    if document.paragraphs:  # Check if document contains any paragraphs
+        document.add_page_break()
+    header = document.add_heading(level=2)
+    run = header.add_run(build_header)
+    if color:
+        font = run.font
+        font.color.rgb = color
+        font.bold = True  # Make the text bold
     document.add_heading("Vulnerable Host:", level=3)
     paragraph = document.add_paragraph(host)
     document.add_heading("Vulnerable URL:", level=3)
@@ -179,12 +204,126 @@ def buildWordDoc(name, severity, host, ip, path, location, issueBackground, issu
         if len(i) > 5:
             document.add_paragraph(i, style='List Bullet')
 
+    document.add_heading("Other Endpoints with the Same Vulnerability:", level=3)
     # add blank line to end of issue
     # paragraph = document.add_paragraph(' ')
     # paragraph = document.add_paragraph(' ')
+    
     paragraph_format = paragraph.paragraph_format
     # formatting to keep our vulns together instead of line breaks
     paragraph_format.keep_together
+
+def create_severity_graph(severity_counts):
+    """
+    Creates a bar graph showing the count of issues for each severity level.
+    """
+    # Extract severity levels and counts from severity_counts dictionary
+    severities = list(severity_counts.keys())
+    counts = list(severity_counts.values())
+
+    # Plot the bar graph
+    plt.figure(figsize=(6, 4))  # Adjust figure size
+    bars = plt.bar(severities, counts, color=['red', 'orange', 'yellow', 'green'])
+    plt.xlabel('Severity Level')
+    plt.ylabel('Number of Issues')
+    plt.title('Severity Distribution')
+    plt.grid(axis='y', linestyle='--', alpha=0.7)  # Add grid lines
+
+    # Add counts above each bar
+    for bar, count in zip(bars, counts):
+        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), str(count), ha='center', va='bottom')
+
+    buffer = io.BytesIO()
+    plt.savefig(buffer, format='png')
+    buffer.seek(0)
+    plt.close()
+
+    p = document.add_paragraph()
+    r = p.add_run()
+    r.add_picture(buffer)
+
+def buildWordDocRepeat(host, path):
+    paragraph = document.add_paragraph(host+path)
+    paragraph_format = paragraph.paragraph_format
+    # formatting to keep our vulns together instead of line breaks
+    paragraph_format.keep_together
+
+def severityCounts(xmlInFile):
+    cwd = os.getcwd()
+    xmlFileIn = os.path.join(cwd, xmlInFile)
+    global issueList
+    issueList = []
+    # inputfile for the XML
+    # THIS WILL BREAK IF YOU CHANGE HTML.PARSER!
+    # try:
+    if not os.path.isfile(xmlFileIn):
+        status_logger.critical('Cant open XML! {}'.format(xmlInFile))
+        exit(1)
+
+    soup = BeautifulSoup(open(xmlInFile, 'r'), 'html.parser')
+    status_logger.info('Using XML Input File {}'.format(xmlInFile))
+
+    # pull all issue tags from XML
+    issues = soup.findAll('issue')
+    
+    severity_counts = {'High': 0, 'Medium': 0, 'Low': 0, 'Information': 0}
+
+    for i in issues:
+        severity = i.find('severity')
+        severity = str(severity)
+        severity = strip_tags(severity)
+        # print("SEVERITY",severity)
+        if severity in severity_counts:
+            severity_counts[severity] += 1
+
+    return severity_counts
+
+def pathCounts(xmlInFile):
+
+    output_paths = []
+    new_paths = []
+
+    cwd = os.getcwd()
+    xmlFileIn = os.path.join(cwd, xmlInFile)
+    global issueList
+    issueList = []
+    # inputfile for the XML
+    # THIS WILL BREAK IF YOU CHANGE HTML.PARSER!
+    # try:
+    if not os.path.isfile(xmlFileIn):
+        status_logger.critical('Cant open XML! {}'.format(xmlInFile))
+        exit(1)
+
+    soup = BeautifulSoup(open(xmlInFile, 'r'), 'html.parser')
+    status_logger.info('Using XML Input File {}'.format(xmlInFile))
+
+    # pull all issue tags from XML
+    path_xml = soup.findAll('path')
+    pattern = r'<path><!\[CDATA\[(.*?)\]\]></path>'
+    
+    for xml_string in path_xml:
+        # Use re.search to find the match
+        match = re.search(pattern, str(xml_string))
+        
+        if match:
+            # Extract the content inside the CDATA section and append to paths list
+            new_paths.append(match.group(1))
+    print("new_paths", new_paths)
+
+    # for i in new_paths:
+    #     print("single path", i)
+    #     path = i.find('path')
+        
+    #     path = str(path)
+    #     path = strip_tags(path)
+        
+    #     # print("SEVERITY",severity)
+    #     output_paths.append(path)
+
+    
+    print("len of output_paths",output_paths)
+
+    return new_paths
 
 
 def process(xmlInFile):
@@ -204,8 +343,17 @@ def process(xmlInFile):
 
     # pull all issue tags from XML
     issues = soup.findAll('issue')
+    severity_order = {
+    "High": 4,
+    "Medium": 3,
+    "Low": 2,
+    "Information": 1
+    }
+    sorted_issues = sorted(issues, key=lambda x: severity_order.get(x.find('severity').text, 0), reverse=True)
+    #sorted_issues = sorted(issues, key=lambda x: x.find('severity').text)  # 'ZZZ' ensures 'None' values are sorted to the end
+    # print(sorted_issues)
 
-    for i in issues:
+    for i in sorted_issues:
         name = i.find('name').text
         host = i.find('host')
         ip = host['ip']
@@ -214,12 +362,17 @@ def process(xmlInFile):
         location = i.find('location').text
         severity = i.find('severity').text
         confidence = i.find('confidence').text
-        issueBackground = i.find('issuebackground').text
-        issueBackground = str(issueBackground)
+
+        try: 
+            issueBackground = i.find('issuebackground').text
+            issueBackground = str(issueBackground)
         # have to replace commas before making csv. Replaced with | for now.
-        issueBackground = strip_tags(issueBackground)
+            issueBackground = strip_tags(issueBackground)
         # this was a fix for the CSV outfile. Need to rethink the order of this.
-        issueBackground = issueBackground.replace(',', "|")
+            issueBackground = issueBackground.replace(',', "|")
+        except:
+            issueBackground = 'BLANK'
+            status_logger.error('issueBackground  is BLANK')
 
         try:
             remediationBackground = i.find('remediationbackground').text
@@ -281,15 +434,21 @@ def process(xmlInFile):
         if issueLine not in str(vulnList):
             # build our word document here
             buildWordDoc(name, severity, host, ip, path, location, issueBackground, issueDetail, remediationBackground,
-                         vulnerabilityClassification)
+                            vulnerabilityClassification)
             # after issue gets entered into word.
             vulnList.append(issueLine)
             issue_logger.info(issueLine)
+            # paths.append(path)
         # logic if issue/vuln has already been reported on.
         if issueLine in str(vulnList):
-            issue_logger.warning('{} ({}) Risk: Has already been reported on! Skipping!!'.format(name, severity))
-            sendSkipped = (name, severity, host, ip, path, location, vulnerabilityClassification, confidence)
-            skippedVulnList.append(sendSkipped)
+                buildWordDocRepeat(host, path)
+                # paths.append(path)
+            # vulnList.append(issueLine)
+            # issue_logger.info(issueLine)
+            # issue_logger.warning('{} ({}) Risk: Has already been reported on! Skipping!!'.format(name, severity))
+        
+            # sendSkipped = (name, severity, host, ip, path, location, vulnerabilityClassification, confidence)
+            # skippedVulnList.append(sendSkipped)
 
         """
         result = (name, host, ip, location, severity, confidence, issueBackground, remediationBackground,
@@ -300,9 +459,11 @@ def process(xmlInFile):
         result = (name, host, ip, location, severity, confidence, issueBackground, remediationBackground,
                   vulnerabilityClassification, issueDetail)
         issueList.append(result)
+    
 
     status_logger.info('{} issues to report on'.format(len(issueList)))
     status_logger.info('Successfully Generate Data for Word Doc Creation')
+
 
 
 def createSkippedVulnsOutput():
@@ -311,8 +472,8 @@ def createSkippedVulnsOutput():
 
     """
     # add page break to get this appendix on new line
-    document.add_page_break()
-    document.add_heading('Additional Vulnerability Details', level=1)
+    # document.add_page_break()
+    # document.add_heading('Additional Vulnerability Details', level=1)
 
     skippedVulnList.sort()
     for skippedVuln in skippedVulnList:
@@ -453,6 +614,58 @@ def processMultipleXmls(dir):
             status_logger.debug('Processing XML file: {}'.format(xmlFile_path))
             process(xmlFile_path)
 
+def add_item_info_to_document(items):
+    """
+    Adds information about the total number of items and unique items to the beginning of the document.
+    """
+    # Calculate total number of items and unique items
+    total_items = len(items)
+    unique_items = len(set(items))
+
+    # Insert information at the beginning of the document
+    p = document.add_paragraph()
+    p.insert_paragraph_before("Total number of URLs accessed: ", style='Heading1').bold = True
+    p.insert_paragraph_before(str(total_items))
+
+    p = document.add_paragraph()
+    p.insert_paragraph_before("Number of unique URLs accessed: ", style='Heading1').bold = True
+    p.insert_paragraph_before(str(unique_items))
+
+
+# def sort_issues_by_risk(document):
+#     # Initialize dictionaries to store issues by risk level
+#     high_risk = []
+#     medium_risk = []
+#     low_risk = []
+#     information_risk = []
+
+#     # Iterate through paragraphs in the document
+#     for paragraph in document.paragraphs:
+#         # Check if the paragraph is a heading with the specific format
+#         if paragraph.style.name.startswith('Heading') and '(' in paragraph.text:
+#             heading_text = paragraph.text.lower()
+#             severity = heading_text.split('(')[-1].split(')')[0].strip()
+#             # Sort issues based on severity
+#             if severity.lower() == 'high risk':
+#                 high_risk.append(paragraph)
+#             elif severity.lower() == 'medium risk':
+#                 medium_risk.append(paragraph)
+#             elif severity.lower() == 'low risk':
+#                 low_risk.append(paragraph)
+#             elif severity.lower() == 'information risk':
+#                 information_risk.append(paragraph)
+
+#     # Create a new document to store sorted issues
+#     sorted_document = Document()
+#     # Add issues to the new document in the desired order
+#     for issues in [high_risk, medium_risk, low_risk, information_risk]:
+#         for issue in issues:
+#             document.add_paragraph(issue.text, style=issue.style.name)
+    
+#     return document
+
+
+
 
 def main():
     parser = optparse.OptionParser()
@@ -492,7 +705,15 @@ def main():
     if not cli_XMLPROCESSDIR:
         status_logger.info('Xml DIR Import not selected')
         status_logger.debug('XML Dir Import Cli ARG : {}'.format(cli_XMLPROCESSDIR))
-        process(xmlFileIn)
+        severity_counts = severityCounts(xmlFileIn)
+        graph = create_severity_graph(severity_counts)
+        paths = pathCounts(xmlFileIn)
+        add_item_info_to_document(paths)
+        doc = process(xmlFileIn)
+        print(doc)
+        # sort_issues_by_risk(document)
+        
+        
     if cli_XMLPROCESSDIR:
         status_logger.info('Xml DIR Import Selected! : {}'.format(cli_XMLPROCESSDIR))
         status_logger.debug('XML Dir Import Cli ARG : {}'.format(cli_XMLPROCESSDIR))
@@ -508,8 +729,9 @@ def main():
     status_logger.debug('cli_XMLPROCESSDIR is Set to {}'.format(cli_XMLPROCESSDIR))
     writeCSV(cli_CSVFILE)
     # generate the appendix
-    createSkippedVulnsOutput()
+    # createSkippedVulnsOutput()
     # Save Word Doc
+    # document.add_picture(graph, width=Inches(5)) 
     document.save(docOutFile)
     status_logger.info('Task Has Completed')
 
